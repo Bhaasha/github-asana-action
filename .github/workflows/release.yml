@@ -1,27 +1,90 @@
-name: Create Release
+name: Release
+
+# Cut a release by pushing a version tag:
+#
+#   pnpm package && git commit -am 'release v1.0.1'   # dist/ must be in sync
+#   git tag v1.0.1 && git push origin master v1.0.1
+#
+# Everything below re-verifies the tag is releasable before it publishes
+# anything, then moves the major tag (v1) that consumers actually pin to.
 
 on:
   push:
-    branches:
-      - master
-  
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
 jobs:
-  build:
-    name: Create Release
+  release:
+    name: Release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
-      - name: set environment variables
-        run: echo "::set-env name=SHORT_SHA::$(git rev-parse --short=7 ${{ github.sha }})"
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Install node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          tag_name: "${{env.SHORT_SHA}}"
-          release_name: Release ${{ github.ref }}
-          body: 'new release'
-          draft: false
-          prerelease: false
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check the tag matches package.json
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$package_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}"
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # The runner executes dist/index.js, never src/. A stale bundle would
+      # release the previous version's behaviour under a new tag, silently.
+      - name: Check dist/ is up to date
+        run: |
+          pnpm package
+          if [ -n "$(git status --porcelain dist)" ]; then
+            echo "::error::dist/ is out of date - run 'pnpm package' and commit the result"
+            git status --porcelain dist
+            git --no-pager diff --stat -- dist
+            exit 1
+          fi
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # a prerelease (v1.1.0-rc.1) must not become @latest, and must not
+          # move the major tag out from under everyone on the stable line
+          case "${GITHUB_REF_NAME}" in
+            *-*) channel=--prerelease ;;
+            *)   channel=--latest ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            "${channel}"
+
+      # Consumers pin to the major tag (uses: Bhaasha/github-asana-action@v1),
+      # so it has to be repointed at each stable release.
+      - name: Move the major tag
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          major="${GITHUB_REF_NAME%%.*}"
+          git tag --force "${major}" "${GITHUB_SHA}"
+          git push --force origin "refs/tags/${major}"

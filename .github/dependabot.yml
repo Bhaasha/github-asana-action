@@ -1,0 +1,9 @@
+# Dependabot config
+# More complex example: https://docs.github.com/en/code-security/tutorials/secure-your-dependencies/customizing-dependabot-prs#full-example-with-multi-ecosystem-groups
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

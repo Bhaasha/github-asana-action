@@ -1,5 +1,5 @@
-import type { components } from "./asana-openapi-schema";
-import {
+import type { components } from "./asana-openapi-schema.ts";
+import type {
   UsersApi,
   TasksApi,
   SectionsApi,
@@ -7,10 +7,16 @@ import {
   CustomFieldSettingsApi,
 } from "asana";
 
-const Asana = require("asana");
-const core = require("@actions/core");
-const github = require("@actions/github");
+import Asana from "asana";
+import * as core from "@actions/core";
+import * as github from "@actions/github";
 type AsanaSchemas = components["schemas"];
+
+// targets are matched either by project name or by project id, so log whichever
+// one the caller actually gave us
+function describeTarget(target: any): string {
+  return target.project ?? target.project_id;
+}
 
 async function moveSection(taskId: string, targets: any[]) {
   const tasksClient = new Asana.TasksApi() as TasksApi;
@@ -22,15 +28,15 @@ async function moveSection(taskId: string, targets: any[]) {
 
   const sectionClient = new Asana.SectionsApi() as SectionsApi;
 
-  targets.forEach(async (target) => {
+  for (const target of targets) {
     const targetProject = task.projects?.find((project) =>
       target.project
         ? project.name === target.project
         : project.gid === target.project_id
     );
-    if (!targetProject) {
-      core.info(`This task does not exist in "${target.project}" project`);
-      return;
+    if (!targetProject?.gid) {
+      core.info(`This task does not exist in "${describeTarget(target)}" project`);
+      continue;
     }
     const sections = (
       await sectionClient.getSectionsForProject(targetProject.gid, {})
@@ -38,18 +44,18 @@ async function moveSection(taskId: string, targets: any[]) {
     let targetSection = sections.find(
       (section) => section.name === target.section
     );
-    if (targetSection) {
+    if (targetSection?.gid) {
       const data: AsanaSchemas["SectionTaskInsertRequest"] = {
         task: taskId,
       };
       await sectionClient.addTaskForSection(targetSection.gid, {
         body: { data },
       });
-      core.info(`Moved to: ${target.project}/${target.section}`);
+      core.info(`Moved to: ${describeTarget(target)}/${target.section}`);
     } else {
       core.error(`Asana section ${target.section} not found.`);
     }
-  });
+  }
 }
 
 async function updateFields(
@@ -67,15 +73,15 @@ async function updateFields(
   const customFieldSettingsClient =
     new Asana.CustomFieldSettingsApi() as CustomFieldSettingsApi;
 
-  targets.forEach(async (target) => {
+  for (const target of targets) {
     const targetProject = task.projects?.find((project) =>
       target.project
         ? project.name === target.project
         : project.gid === target.project_id
     );
-    if (!targetProject) {
-      core.info(`This task does not exist in "${target.project}" project`);
-      return;
+    if (!targetProject?.gid) {
+      core.info(`This task does not exist in "${describeTarget(target)}" project`);
+      continue;
     }
     const customFields = (
       await customFieldSettingsClient.getCustomFieldSettingsForProject(
@@ -86,43 +92,42 @@ async function updateFields(
 
     const fields = target.fields as any[];
     if (!fields) {
-      core.info(`No fields to update for ${target.project}`);
-      return;
+      core.info(`No fields to update for ${describeTarget(target)}`);
+      continue;
     }
-    let fieldsToUpdate: AsanaSchemas["TaskRequest"]["custom_fields"] = {};
-    fields.forEach(async (targetField: any) => {
+    let fieldsToUpdate: AsanaSchemas["TaskUpdateRequest"]["custom_fields"] = {};
+    for (const targetField of fields) {
       let targetCustomField = customFields.find((field) =>
         targetField.name
           ? field.custom_field?.name === targetField.name
           : field.custom_field?.gid === targetField.id
       );
       const customField = targetCustomField?.custom_field;
-      const fieldId = targetCustomField?.custom_field;
       if (customField && customField.gid && customField.resource_subtype) {
-        const euumOptions = new Map(
+        const enumOptions = new Map(
           customField.enum_options?.map((option) => [option.name, option.gid])
         );
         switch (customField.resource_subtype) {
           case "enum":
-            if (!euumOptions.has(targetField.value)) {
+            if (!enumOptions.has(targetField.value)) {
               core.error(
-                `Asana custom field enum value ${target.value} not found in ${targetField.name} field.`
+                `Asana custom field enum value ${targetField.value} not found in ${targetField.name} field.`
               );
               break;
             }
             fieldsToUpdate[customField.gid] =
-              euumOptions.get(targetField.value) ?? "";
+              enumOptions.get(targetField.value) ?? "";
             break;
           case "multi_enum":
             let enumValues = targetField.value as string[];
             enumValues = enumValues.map((value) => {
-              if (!euumOptions.has(value)) {
+              if (!enumOptions.has(value)) {
                 core.error(
                   `Asana custom field enum value ${value} not found in ${targetField.name} field.`
                 );
                 return "";
               }
-              return euumOptions.get(value) ?? "";
+              return enumOptions.get(value) ?? "";
             });
             fieldsToUpdate[customField.gid] = enumValues as any;
             break;
@@ -133,15 +138,15 @@ async function updateFields(
       } else {
         core.error(`Asana custom field ${targetField.name} not found.`);
       }
-    });
+    }
 
-    const data: AsanaSchemas["TaskRequest"] = {
+    const data: AsanaSchemas["TaskUpdateRequest"] = {
       custom_fields: fieldsToUpdate,
       completed: isComplete,
     };
     await tasksClient.updateTask({ data }, taskId, {});
     core.info(`Updated: ${JSON.stringify(fields)}`);
-  });
+  }
 }
 
 async function findComment(
@@ -230,22 +235,14 @@ export async function action() {
   console.info("calling", ACTION);
   switch (ACTION) {
     case "assert-link": {
-      const githubToken = core.getInput("github-token", { required: true });
       const linkRequired =
         core.getInput("link-required", { required: true }) === "true";
-      const octokit = new github.GitHub(githubToken);
-      const statusState =
-        !linkRequired || foundAsanaTasks.length > 0 ? "success" : "error";
-      core.info(
-        `setting ${statusState} for ${github.context.payload.pull_request.head.sha}`
-      );
-      octokit.repos.createStatus({
-        ...github.context.repo,
-        context: "asana-link-presence",
-        state: statusState,
-        description: "asana link not found",
-        sha: github.context.payload.pull_request.head.sha,
-      });
+      if (linkRequired && foundAsanaTasks.length === 0) {
+        core.setFailed(
+          "no asana task link found in the pull request body" +
+            (TRIGGER_PHRASE ? ` after "${TRIGGER_PHRASE}"` : "")
+        );
+      }
       break;
     }
     case "add-comment": {
@@ -271,7 +268,7 @@ export async function action() {
       const removedCommentIds = [];
       for (const taskId of foundAsanaTasks) {
         const comment = await findComment(taskId, commentId);
-        if (comment) {
+        if (comment?.gid) {
           console.info("removing comment", comment.gid);
           const storiesClient = new Asana.StoriesApi() as StoriesApi;
           try {
@@ -295,7 +292,7 @@ export async function action() {
         );
         try {
           const tasksClient = new Asana.TasksApi() as TasksApi;
-          const data: AsanaSchemas["TaskRequest"] = {
+          const data: AsanaSchemas["TaskUpdateRequest"] = {
             completed: isComplete,
           };
           await tasksClient.updateTask({ data }, taskId, {});
@@ -334,7 +331,7 @@ export async function action() {
       return updatedTasks;
     }
     default:
-      core.setFailed("unexpected action ${ACTION}");
+      core.setFailed(`unexpected action ${ACTION}`);
   }
 }
 

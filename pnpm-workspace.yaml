@@ -1,0 +1,5 @@
+allowBuilds:
+  # esbuild's install script swaps its js shim for the raw platform binary,
+  # which pnpm's bin wrapper then tries to run through node. The shim resolves
+  # the same binary out of @esbuild/* on its own, so the script is not needed.
+  esbuild: false
