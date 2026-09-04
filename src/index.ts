@@ -1,5 +1,5 @@
-import action from "./action";
-const core = require("@actions/core");
+import action from "./action.ts";
+import * as core from "@actions/core";
 
 async function run() {
   try {
